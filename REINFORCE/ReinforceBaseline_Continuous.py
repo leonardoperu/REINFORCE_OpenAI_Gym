@@ -9,6 +9,7 @@ from os.path import isdir
 
 # Configuration parameters for the whole setup
 GYM_ENVIRONMENT = 'Pendulum-v0'  # "LunarLanderContinuous-v2"
+TRAIN = True
 
 GAMMA = 0.98  # Discount factor for past returns (G_t)
 LEARNING_RATE = 1e-5
@@ -58,7 +59,7 @@ class Agent:
                 self.baseline_net.add(tf.keras.layers.Dense(units, activation='relu'))
             self.baseline_net.add(tf.keras.layers.Dense(1))
 
-    def play_episode(self, env, episode, max_steps_per_episode=200):
+    def play_episode_and_train(self, env, episode, max_steps_per_episode=200):
         state = env.reset()
         episode_reward = 0
         action_probs_history = []
@@ -135,6 +136,41 @@ class Agent:
         self.optimizer.apply_gradients(zip(grads_baseline, self.baseline_net.trainable_variables))
         return last_step, episode_reward
 
+    def play_episode_no_train(self, env, max_steps_per_episode=200):
+        state = env.reset()
+        episode_reward = 0
+        last_step = 0
+
+        """ Generation of the episode steps """
+        for t in range(max_steps_per_episode):
+            last_step += 1
+            env.render()
+
+            state = tf.convert_to_tensor(state, dtype=np.float32)
+            state = tf.expand_dims(state, 0)
+
+            gaussian_means, gaussian_stdd = self.policy_net(state)
+
+            #sample action from gaussian probability distribution(s)
+            action = []
+            for mi, stdd in zip(gaussian_means, gaussian_stdd):
+                action_component, pi_component = self.gaussian_action_pi(mi[0] * ACTION_BOUND, stdd[0])
+
+                if action_component < -ACTION_BOUND:                        # cap the action between [ -ACTION_BOUND, +ACTION_BOUND ]
+                    action_component += -ACTION_BOUND - action_component
+                elif action_component > ACTION_BOUND:
+                    action_component += ACTION_BOUND - action_component
+
+                action.append(action_component.numpy())
+
+            # take the chosen action in the environment
+            state, reward, done, info = env.step(action)                             # list of the rewards R_t+1 for each time step in the episode
+            episode_reward += reward
+
+            if done or episode_reward >= 200.0:
+                break
+        return last_step, episode_reward
+
     @staticmethod
     def gaussian_action_pi(mean, stddev):
         gaussian = tfp.distributions.Normal(mean, stddev)
@@ -149,7 +185,8 @@ class Agent:
         path = path[:-1] + "_"
         for layer in self.baseline_net.layers[:-1]:
             path += str(layer.units) + "x"
-        return path[:-1]
+        path = path[:-1] + "/" + str(STEPS_PER_EPISODE) + "_steps_per_episode"
+        return path
 
     def save_models(self, dir_path, episodes):
         path = self.folder_path(dir_path)
@@ -171,8 +208,7 @@ class Agent:
     #                               # 
     #           M A I N             #
     #                               #
-    #################################
-"""
+    ################################# """
 
 env = gym.make(GYM_ENVIRONMENT)  # Create the environment
 
@@ -185,18 +221,26 @@ agent = Agent(num_inputs, num_actions, gamma=GAMMA, lr=LEARNING_RATE,
               loading_dir=MODEL_LOADING_DIR, render_after_n_episodes=RENDER_AFTER)
 
 for ep in range(EPISODES):
-    steps, ep_reward = agent.play_episode(env, ep, STEPS_PER_EPISODE)
+    if TRAIN:
+        steps, ep_reward = agent.play_episode_and_train(env, ep, STEPS_PER_EPISODE)
+        if (ep + 1) % SAVE_EVERY == 0:
+            agent.save_models(MODEL_SAVING_DIR, ep+1)
+    else:
+        steps, ep_reward = agent.play_episode_no_train(env, STEPS_PER_EPISODE)
+
     print("Episode " + str(ep))
     print("\t steps: {};\treward: {}".format(steps, ep_reward))
     df_data.append([steps, ep_reward])
-    if (ep + 1) % SAVE_EVERY == 0:
-        agent.save_models(MODEL_SAVING_DIR, ep+1)
 
 df = pd.DataFrame(df_data, columns=['steps', 'reward'])
 csv_dir = agent.folder_path(MODEL_SAVING_DIR)
+if TRAIN:
+    csv_path = csv_dir + "/summary.csv"
+else:
+    csv_path = csv_dir + "/last_game.csv"
 if not isdir(csv_dir):
     makedirs(csv_dir, exist_ok=True)
-df.to_csv(agent.folder_path(MODEL_SAVING_DIR)+"/summary.csv")
+df.to_csv(csv_path)
 
 x = df.index.values
 m, b = np.polyfit(x, df['reward'], 1)

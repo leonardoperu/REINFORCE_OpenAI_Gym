@@ -7,19 +7,20 @@ from os import makedirs
 from os.path import isdir
 
 # Configuration parameters for the whole setup
-GYM_ENVIRONMENT = "LunarLander-v2"
+GYM_ENVIRONMENT = "CartPole-v1"
+TRAIN = True
 
 GAMMA = 0.98  # Discount factor for past returns (G_t)
 LEARNING_RATE = 1e-4
 HIDDEN_POLICY = [256, 128]
 HIDDEN_BASELINE = [256, 128]
 
-EPISODES = 15
-STEPS_PER_EPISODE = 400
+EPISODES = 30
+STEPS_PER_EPISODE = 200
 RENDER_AFTER = 0
 
 MODEL_SAVING_DIR = "models"
-MODEL_LOADING_DIR = "models/" + GYM_ENVIRONMENT + "/reinforce_bl_256x128_256x128/450_steps_per_episode/5200_episodes"
+MODEL_LOADING_DIR = None  # "models/" + GYM_ENVIRONMENT + "/reinforce_bl_64x32_64x32/200_steps_per_episode/6000_episodes"
 SAVE_EVERY = 500    # save the model every N steps
 
 
@@ -106,7 +107,9 @@ class Agent:
                 baseline_losses.append(baseline_loss)
 
             total_policy_loss = sum(policy_losses)
+            #total_policy_loss = tf.reduce_mean(policy_losses)
             total_baseline_loss = sum(baseline_losses)
+            #total_baseline_loss = tf.reduce_mean(baseline_losses)
 
         """ Backpropagation """
         grads_policy = tape.gradient(total_policy_loss, self.policy_net.trainable_variables)
@@ -115,8 +118,31 @@ class Agent:
         self.optimizer.apply_gradients(zip(grads_baseline, self.baseline_net.trainable_variables))
         return last_step, episode_reward
 
-    def play_episode_no_train(self, env, episode, max_steps_per_episode=200):
-        pass
+    def play_episode_no_train(self, env, max_steps_per_episode=200):
+        state = env.reset()
+        episode_reward = 0
+        last_step = 0
+
+        """ Generation of the episode's steps """
+        for t in range(max_steps_per_episode):
+            last_step += 1
+            env.render()
+
+            state = tf.convert_to_tensor(state, dtype=np.float32)
+            state = tf.expand_dims(state, 0)
+
+            action_probs = self.policy_net(state)
+
+            # sample action from action probability distribution
+            action = np.random.choice(num_actions, p=np.reshape(action_probs, self.n_actions))
+
+            # take the chosen action in the environment
+            state, reward, done, info = env.step(action)
+            episode_reward += reward
+
+            if done or episode_reward >= 200.0:
+                break
+        return last_step, episode_reward
 
     def folder_path(self, dir_path):
         path = dir_path + "/" + GYM_ENVIRONMENT + "/reinforce_bl_"
@@ -148,8 +174,7 @@ class Agent:
     #                               # 
     #           M A I N             #
     #                               #
-    #################################
-"""
+    ################################# """
 
 env = gym.make(GYM_ENVIRONMENT)  # Create the gym environment
 
@@ -162,18 +187,26 @@ agent = Agent(num_inputs, num_actions, gamma=GAMMA, lr=LEARNING_RATE,
               loading_dir=MODEL_LOADING_DIR, render_after_n_episodes=RENDER_AFTER)
 
 for ep in range(EPISODES):
-    steps, ep_reward = agent.play_episode_and_train(env, ep, STEPS_PER_EPISODE)
+    if TRAIN:
+        steps, ep_reward = agent.play_episode_and_train(env, ep, STEPS_PER_EPISODE)
+        if (ep + 1) % SAVE_EVERY == 0:
+            agent.save_models(MODEL_SAVING_DIR, ep+1)
+    else:
+        steps, ep_reward = agent.play_episode_no_train(env, STEPS_PER_EPISODE)
+
     print("Episode " + str(ep))
     print("\t steps: {};\treward: {}".format(steps, ep_reward))
     df_data.append([steps, ep_reward])
-    if (ep + 1) % SAVE_EVERY == 0:
-        agent.save_models(MODEL_SAVING_DIR, ep+1)
 
 df = pd.DataFrame(df_data, columns=['steps', 'reward'])
 csv_dir = agent.folder_path(MODEL_SAVING_DIR)
+if TRAIN:
+    csv_path = csv_dir + "/summary.csv"
+else:
+    csv_path = csv_dir + "/last_game.csv"
 if not isdir(csv_dir):
     makedirs(csv_dir, exist_ok=True)
-df.to_csv(agent.folder_path(MODEL_SAVING_DIR)+"/summary.csv")
+df.to_csv(csv_path)
 
 x = df.index.values
 m, b = np.polyfit(x, df['reward'], 1)
